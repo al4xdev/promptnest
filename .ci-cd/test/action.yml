@@ -1,0 +1,44 @@
+name: Run PromptNest checks
+description: Install the Python toolchain and run repository checks.
+
+inputs:
+  python-version:
+    description: Python version used for the check job.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install development dependencies
+      shell: bash
+      run: uv sync --dev
+
+    - name: Run Ruff
+      shell: bash
+      run: uv run ruff check src tests consumer_tests typing_tests
+
+    - name: Run mypy
+      if: inputs.python-version == '3.12'
+      shell: bash
+      run: uv run mypy
+
+    - name: Run pytest
+      shell: bash
+      run: uv run pytest
+
+    - name: Test editable installation as a consumer
+      shell: bash
+      run: |
+        uv venv /tmp/promptnest-consumer --python "${{ inputs.python-version }}" --seed
+        /tmp/promptnest-consumer/bin/python -m pip install -e .
+        /tmp/promptnest-consumer/bin/python -m unittest discover -s consumer_tests -v

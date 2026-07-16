@@ -1,0 +1,10 @@
+{
+  "chunk": {
+    "summary": "Installed package parsed fixture JSON.",
+    "keywords": ["editable-install", "public-api"]
+  },
+  "final": {
+    "full_summary": "The installed package completed its public workflow.",
+    "all_keywords": ["editable-install", "public-api", "typed"]
+  }
+}

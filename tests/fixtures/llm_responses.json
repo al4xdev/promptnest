@@ -1,0 +1,10 @@
+{
+  "chunk": {
+    "summary": "PromptNest processed a deterministic chunk.",
+    "keywords": ["promptnest", "deterministic"]
+  },
+  "final": {
+    "full_summary": "All deterministic chunk responses were merged.",
+    "all_keywords": ["promptnest", "deterministic", "structured-output"]
+  }
+}

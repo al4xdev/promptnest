@@ -1,0 +1,34 @@
+name: Build PromptNest distributions
+description: Build and validate the source and wheel distributions.
+
+runs:
+  using: composite
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v6
+      with:
+        enable-cache: true
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install build tools
+      shell: bash
+      run: uv sync --dev
+
+    - name: Build distributions
+      shell: bash
+      run: uv build --clear
+
+    - name: Validate package metadata
+      shell: bash
+      run: uv run twine check dist/*
+
+    - name: Smoke-test the wheel
+      shell: bash
+      run: |
+        uv venv /tmp/promptnest-wheel --python 3.12 --seed
+        /tmp/promptnest-wheel/bin/python -m pip install dist/*.whl
+        /tmp/promptnest-wheel/bin/python -c "from promptnest import PromptNest; print(PromptNest.__name__)"
