@@ -1,6 +1,7 @@
 # 🪺 PromptNest
 
-> Typed async map/consolidate/reduce orchestration for LLM applications.
+> Typed async nested map/consolidate/reduce orchestration for OpenAI, Azure OpenAI,
+> LangChain, LangGraph, CrewAI, and custom LLM runtimes.
 
 [![PyPI](https://img.shields.io/pypi/v/promptnest)](https://pypi.org/project/promptnest/)
 [![Python](https://img.shields.io/pypi/pyversions/promptnest)](https://pypi.org/project/promptnest/)
