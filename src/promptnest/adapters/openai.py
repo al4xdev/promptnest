@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
-
-if TYPE_CHECKING:
-    from openai import AsyncAzureOpenAI, AsyncOpenAI
 
 ResultModel = TypeVar("ResultModel", bound=BaseModel)
 
@@ -17,7 +14,7 @@ class OpenAIAdapter:
 
     def __init__(
         self,
-        client: AsyncOpenAI | AsyncAzureOpenAI,
+        client: Any,
         *,
         default_model: str | None = None,
     ) -> None:
@@ -52,4 +49,4 @@ class OpenAIAdapter:
                 "OpenAI returned no parsed output "
                 f"(finish_reason={choice.finish_reason!r})"
             )
-        return parsed
+        return output_model.model_validate(parsed)

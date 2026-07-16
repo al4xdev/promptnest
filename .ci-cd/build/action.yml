@@ -16,19 +16,21 @@ runs:
 
     - name: Install build tools
       shell: bash
-      run: uv sync --dev
+      run: uv sync --locked --dev
 
     - name: Build distributions
       shell: bash
-      run: uv build --clear
+      run: |
+        uv lock --check
+        uv build --no-sources --clear
 
     - name: Validate package metadata
       shell: bash
-      run: uv run twine check dist/*
+      run: uv run --locked twine check --strict dist/*
 
     - name: Smoke-test the wheel
       shell: bash
       run: |
         uv venv /tmp/promptnest-wheel --python 3.12 --seed
-        /tmp/promptnest-wheel/bin/python -m pip install dist/*.whl
+        /tmp/promptnest-wheel/bin/python -m pip install --disable-pip-version-check dist/*.whl
         /tmp/promptnest-wheel/bin/python -c "from promptnest import PromptNest; print(PromptNest.__name__)"

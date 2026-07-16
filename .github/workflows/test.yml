@@ -45,17 +45,17 @@ jobs:
           python-version: "3.12"
 
       - name: Install every official integration
-        run: uv sync --all-extras --dev
+        run: uv sync --locked --all-extras --dev
 
       - name: Run adapter tests
-        run: uv run pytest tests/test_adapters.py
+        run: uv run --locked pytest --strict-config --strict-markers tests/test_adapters.py
 
       - name: Import optional frameworks
         env:
           HOME: /tmp/promptnest-home
           XDG_DATA_HOME: /tmp/promptnest-home/share
         run: |
-          uv run python -c "import crewai, langchain, langgraph, openai"
+          uv run --locked python -c "import crewai, langchain, langgraph, openai"
 
   package:
     name: Package distributions

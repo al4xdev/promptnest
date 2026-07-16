@@ -90,7 +90,7 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-ra --strict-markers"
+addopts = "-ra --strict-config --strict-markers"
 
 [tool.ruff]
 target-version = "py311"

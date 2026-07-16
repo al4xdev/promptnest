@@ -224,11 +224,12 @@ No network model call is made in either test.
 
 ```fish
 uv sync --all-extras --dev
-uv run ruff check src tests consumer_tests
-uv run mypy
-uv run pytest
-uv build
-uv run twine check dist/*
+uv run --locked ruff check --no-fix src tests consumer_tests typing_tests
+uv run --locked mypy --strict
+uv run --locked pytest --strict-config --strict-markers
+uv lock --check
+uv build --no-sources
+uv run --locked twine check --strict dist/*
 ```
 
 Tags matching `v*` build the distributions and publish them through PyPI Trusted Publishing. The

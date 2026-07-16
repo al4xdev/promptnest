@@ -21,24 +21,24 @@ runs:
 
     - name: Install development dependencies
       shell: bash
-      run: uv sync --dev
+      run: uv sync --locked --dev
 
     - name: Run Ruff
       shell: bash
-      run: uv run ruff check src tests consumer_tests typing_tests
+      run: uv run --locked ruff check --no-fix src tests consumer_tests typing_tests
 
     - name: Run mypy
       if: inputs.python-version == '3.12'
       shell: bash
-      run: uv run mypy
+      run: uv run --locked mypy --strict
 
     - name: Run pytest
       shell: bash
-      run: uv run pytest
+      run: uv run --locked pytest --strict-config --strict-markers
 
     - name: Test editable installation as a consumer
       shell: bash
       run: |
         uv venv /tmp/promptnest-consumer --python "${{ inputs.python-version }}" --seed
-        /tmp/promptnest-consumer/bin/python -m pip install -e .
+        /tmp/promptnest-consumer/bin/python -m pip install --disable-pip-version-check -e .
         /tmp/promptnest-consumer/bin/python -m unittest discover -s consumer_tests -v
