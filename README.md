@@ -12,6 +12,29 @@ sub-fragments that belong to the same key, and can reduce every typed result int
 Pydantic model. The orchestration stays independent from the model runtime: OpenAI, LangChain,
 LangGraph, CrewAI, or any async callable can sit behind the same adapter contract.
 
+## Why I built it
+
+I first developed this pattern at a time when language models had much smaller context windows.
+I needed to analyze large source documents and generate long deliverables without losing
+consistency between sections. Sending everything in one prompt was either impossible or produced
+results that drifted as the document grew.
+
+The solution was a nested map/reduce workflow:
+
+1. split the source into meaningful keyed sections;
+2. map a structured prompt over the fragments concurrently;
+3. consolidate fragments that belong to the same logical section;
+4. reduce the typed section results into one coherent document.
+
+PromptNest is the reusable library extracted from that approach. Pydantic models turn every LLM
+boundary into an explicit contract, while the keyed intermediate results preserve document
+structure during synthesis. This made it practical to create large documents with more consistent
+terminology, coverage, and organization even under tight context limits.
+
+Modern models have larger contexts, but the architecture remains useful. It provides parallelism,
+bounded retries, partial-failure handling, typed intermediate artifacts, explicit document
+structure, and the ability to inspect or rerun one section without regenerating the whole output.
+
 ## Install
 
 ```fish
