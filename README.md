@@ -12,15 +12,6 @@ sub-fragments that belong to the same key, and can reduce every typed result int
 Pydantic model. The orchestration stays independent from the model runtime: OpenAI, LangChain,
 LangGraph, CrewAI, or any async callable can sit behind the same adapter contract.
 
-```mermaid
-flowchart LR
-    A[Keyed text fragments] --> B[Pre-prompt map]
-    B --> C[Per-key consolidation]
-    C --> D[Typed partial_answers]
-    D --> E[Optional pos-prompt reduce]
-    E --> F[Typed final result]
-```
-
 ## Install
 
 ```fish
@@ -92,6 +83,180 @@ asyncio.run(main())
 The keys passed to `have()` are preserved in `runner.partial_answers`. If a key contains multiple
 fragments, PromptNest invokes the pre-prompt for each fragment and invokes it once more with their
 JSON results to produce one value for that key.
+
+## How nested map/reduce works
+
+PromptNest treats the input as a mapping from a meaningful key to one or more text fragments:
+
+```python
+chunks = {
+    "introduction": ["one complete fragment"],
+    "architecture": ["fragment A", "fragment B", "fragment C"],
+    "conclusion": ["one complete fragment"],
+}
+```
+
+Every fragment enters the map stage concurrently. A key containing multiple fragments gets an
+additional nested consolidation call before joining the other keys. The optional reduce stage
+then receives one JSON object containing all typed per-key results.
+
+```mermaid
+flowchart TB
+    INPUT["Keyed input<br/>{ introduction: [I1], architecture: [A1, A2, A3], conclusion: [C1] }"]
+
+    subgraph MAP["1. MAP — set_pre_prompt()"]
+        I1["I1"] --> PI["pre-prompt"]
+        A1["A1"] --> PA1["pre-prompt"]
+        A2["A2"] --> PA2["pre-prompt"]
+        A3["A3"] --> PA3["pre-prompt"]
+        C1["C1"] --> PC["pre-prompt"]
+    end
+
+    subgraph NEST["2. NESTED CONSOLIDATION — only keys with multiple fragments"]
+        PA1 --> AJ["JSON array"]
+        PA2 --> AJ
+        PA3 --> AJ
+        AJ --> AP["same pre-prompt<br/>over partial JSON"]
+    end
+
+    subgraph TYPED["3. TYPED PARTIAL ANSWERS"]
+        PI --> PR["introduction: ChunkSummary"]
+        AP --> AR["architecture: ChunkSummary"]
+        PC --> CR["conclusion: ChunkSummary"]
+    end
+
+    subgraph REDUCE["4. REDUCE — set_pos_prompt()"]
+        PR --> PJ["keyed JSON object"]
+        AR --> PJ
+        CR --> PJ
+        PJ --> POST["pos-prompt"]
+        POST --> FINAL["FinalReport"]
+    end
+
+    INPUT --> I1
+    INPUT --> A1
+    INPUT --> A2
+    INPUT --> A3
+    INPUT --> C1
+```
+
+For the example above, PromptNest makes five concurrent map calls, one nested consolidation call
+for `architecture`, and one final reduce call. The application never has to parse or concatenate
+untyped model text: each boundary is validated by the Pydantic model configured for that stage.
+
+### Map only: process and inspect typed partial results
+
+The reduce stage is optional. This is useful for extraction, classification, moderation, or any
+batch job where each key is independently valuable.
+
+```python
+runner = (
+    PromptNest.have(
+        adapter,
+        {
+            "invoice-001": ["Invoice text..."],
+            "invoice-002": ["Invoice text..."],
+        },
+    )
+    .set_pre_prompt(
+        "Extract invoice fields from:\n{chunk_text}",
+        InvoiceData,
+    )
+)
+
+await runner.get_chunks_result()
+
+invoice = runner.partial_answers["invoice-001"]
+if isinstance(invoice, InvoiceData):
+    print(invoice.total)
+```
+
+### Nested fragments: consolidate one logical section
+
+Fragments under the same key represent one logical unit. PromptNest first maps each fragment and
+then sends their structured JSON back through the same pre-prompt to obtain one result.
+
+```python
+runner = (
+    PromptNest.have(
+        adapter,
+        {
+            "chapter-1": [
+                "Pages 1–10...",
+                "Pages 11–20...",
+                "Pages 21–30...",
+            ]
+        },
+    )
+    .set_pre_prompt(
+        """
+        Summarize this chapter material.
+        The input may be original text or a JSON array of partial summaries:
+
+        {chunk_text}
+        """,
+        ChapterSummary,
+    )
+)
+
+await runner.get_chunks_result()
+chapter = runner.partial_answers["chapter-1"]
+```
+
+The pre-prompt should therefore be valid for both raw text and the JSON array used during nested
+consolidation.
+
+### Reduce: build one final typed result
+
+`run_pos_prompt()` serializes `partial_answers` as a keyed JSON object and inserts it into
+`{partial_answers}`.
+
+```python
+runner.set_pos_prompt(
+    """
+    Produce one report from these section summaries.
+    Preserve the relationship between section names and values:
+
+    {partial_answers}
+    """,
+    FinalReport,
+)
+
+report: FinalReport = await runner.run_pos_prompt()
+```
+
+### Chain multiple PromptNest passes
+
+`is_chain=True` stores each result as `list[str]` containing validated model JSON. That output can
+be passed directly into another runner, creating explicit prompt pipelines without coupling the
+library to a specific agent framework.
+
+```python
+first = (
+    PromptNest.have(adapter, source_chunks)
+    .set_pre_prompt("Extract facts:\n{chunk_text}", ExtractedFacts)
+)
+await first.get_chunks_result(is_chain=True)
+
+second = (
+    PromptNest.have(adapter, first.partial_answers)
+    .set_pre_prompt(
+        "Turn these extracted facts into recommendations:\n{chunk_text}",
+        Recommendation,
+    )
+)
+await second.get_chunks_result()
+```
+
+This produces two independently typed map stages:
+
+```mermaid
+flowchart LR
+    RAW["Raw chunks"] --> MAP1["PromptNest pass 1<br/>ExtractedFacts"]
+    MAP1 --> JSON["Validated JSON chain"]
+    JSON --> MAP2["PromptNest pass 2<br/>Recommendation"]
+    MAP2 --> OUT["Typed recommendations"]
+```
 
 ## Framework adapters
 
