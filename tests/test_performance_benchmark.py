@@ -117,7 +117,14 @@ async def test_failure_under_load_scenarios_pass() -> None:
 
 
 @pytest.mark.asyncio
-async def test_certification_smoke_and_artifacts(tmp_path: Path) -> None:
+async def test_certification_smoke_and_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "promptnest.certify.git_state",
+        lambda: {"commit_sha": "test-sha", "working_tree": "dirty"},
+    )
     result = await certify(jobs=200, samples=3, allow_dirty=True)
     assert result["status"] == "PASS-DEVELOPMENT"
     assert result["eligible"] is False
