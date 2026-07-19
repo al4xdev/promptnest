@@ -16,7 +16,12 @@ from promptnest.adapters import (
     OpenAIAdapter,
 )
 from promptnest.policies import RetryableAdapterError
-from promptnest.protocols import LLMAdapter
+from promptnest.protocols import (
+    LLMAdapter,
+    StreamCompleted,
+    StreamDelta,
+    StreamingLLMAdapter,
+)
 
 from .conftest import ChunkSummary
 
@@ -33,6 +38,29 @@ def test_all_adapters_satisfy_structural_protocol() -> None:
         OpenAIAdapter(MagicMock(), default_model="model"),
     ]
     assert all(isinstance(adapter, LLMAdapter) for adapter in adapters)
+    assert isinstance(adapters[-1], StreamingLLMAdapter)
+
+
+class FakeOpenAIStream:
+    def __init__(self, events: list[Any], completion: Any) -> None:
+        self.events = events
+        self.completion = completion
+
+    async def __aenter__(self) -> FakeOpenAIStream:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+    def __aiter__(self) -> Any:
+        async def iterate() -> Any:
+            for event in self.events:
+                yield event
+
+        return iterate()
+
+    async def get_final_completion(self) -> Any:
+        return self.completion
 
 
 @pytest.mark.asyncio
@@ -110,6 +138,51 @@ async def test_openai_adapter_exposes_observed_token_usage() -> None:
     assert observed.value is parsed
     assert observed.usage is not None
     assert observed.usage.total_tokens == 15
+
+
+@pytest.mark.asyncio
+async def test_openai_adapter_streams_deltas_and_final_structured_output() -> None:
+    parsed = ChunkSummary(summary="ok", keywords=[])
+    completion = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(parsed=parsed),
+                finish_reason="stop",
+            )
+        ],
+        usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2),
+    )
+    stream_call = MagicMock(
+        return_value=FakeOpenAIStream(
+            [
+                SimpleNamespace(type="content.delta", delta='{"summary":'),
+                SimpleNamespace(type="content.delta", delta='"ok"}'),
+            ],
+            completion,
+        )
+    )
+    client = SimpleNamespace(
+        beta=SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(stream=stream_call))
+        )
+    )
+
+    events = [
+        event
+        async for event in OpenAIAdapter(
+            client, default_model="gpt-test"
+        ).stream("hello", ChunkSummary, temperature=0)
+    ]
+
+    assert [event.text for event in events if isinstance(event, StreamDelta)] == [
+        '{"summary":',
+        '"ok"}',
+    ]
+    completed = next(event for event in events if isinstance(event, StreamCompleted))
+    assert completed.value is parsed
+    assert completed.usage is not None
+    assert completed.usage.total_tokens == 7
+    assert stream_call.call_args.kwargs["response_format"] is ChunkSummary
 
 
 @pytest.mark.asyncio

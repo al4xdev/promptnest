@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
 from promptnest.policies import RetryableAdapterError
-from promptnest.protocols import ObservedResult, TokenUsage
+from promptnest.protocols import (
+    ObservedResult,
+    StreamCompleted,
+    StreamDelta,
+    StreamEvent,
+    TokenUsage,
+)
 
 ResultModel = TypeVar("ResultModel", bound=BaseModel)
 
@@ -75,6 +82,62 @@ class OpenAIAdapter:
                 output_tokens=int(getattr(usage, "completion_tokens", 0)),
             )
         return ObservedResult(output_model.model_validate(parsed), token_usage)
+
+    async def stream(
+        self,
+        prompt: str,
+        output_model: type[ResultModel],
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamEvent[ResultModel]]:
+        """Yield SDK text deltas, followed by one validated structured result."""
+        options = dict(kwargs)
+        model = options.pop("model", None) or self.default_model
+        if not model:
+            raise ValueError("OpenAIAdapter requires a model")
+        messages = options.pop("messages", None)
+        if messages is None:
+            messages = [{"role": "user", "content": prompt}]
+
+        try:
+            stream_call = self.client.beta.chat.completions.stream
+            async with stream_call(
+                model=model,
+                messages=messages,
+                response_format=output_model,
+                **options,
+            ) as stream:
+                async for event in stream:
+                    if getattr(event, "type", None) == "content.delta":
+                        delta = getattr(event, "delta", None)
+                        if isinstance(delta, str) and delta:
+                            yield StreamDelta(delta)
+                response = await stream.get_final_completion()
+        except Exception as exc:
+            if getattr(exc, "status_code", None) == 429:
+                raise RetryableAdapterError(
+                    "OpenAI rate limit exceeded",
+                    retry_after_s=_retry_after_seconds(exc),
+                ) from exc
+            raise
+
+        choice = response.choices[0]
+        parsed = choice.message.parsed
+        if parsed is None:
+            raise ValueError(
+                f"OpenAI returned no parsed output (finish_reason={choice.finish_reason!r})"
+            )
+        usage = getattr(response, "usage", None)
+        token_usage = None
+        if usage is not None:
+            token_usage = TokenUsage(
+                input_tokens=int(getattr(usage, "prompt_tokens", 0)),
+                output_tokens=int(getattr(usage, "completion_tokens", 0)),
+            )
+        completed_event: StreamEvent[ResultModel] = StreamCompleted(
+            output_model.model_validate(parsed),
+            token_usage,
+        )
+        yield completed_event
 
 
 def _retry_after_seconds(error: Exception) -> float | None:

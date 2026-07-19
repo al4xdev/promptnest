@@ -133,6 +133,33 @@ await runner.get_chunks_result()
 `execution_metrics` reports the queue high-watermark, producer admission waits, duration, and
 per-provider concurrency/rate-limit waits.
 
+## Streaming and TTFT
+
+The OpenAI adapter can expose structured-output text deltas while preserving the final validated
+Pydantic result:
+
+```python
+from promptnest import StreamUpdate
+
+
+def show_delta(update: StreamUpdate) -> None:
+    print(update.text, end="", flush=True)
+
+
+runner = (
+    PromptNest.have(adapter, {"document": ["Analyze this..."]})
+    .set_streaming(on_delta=show_delta)
+    .set_pre_prompt("{chunk_text}", ChunkSummary)
+)
+await runner.get_chunks_result()
+print(runner.streaming_metrics["ttft_ms"])
+```
+
+`streaming_metrics` contains per-stream observations and nearest-rank p50/p95/p99 distributions
+for TTFT, completion time, and inter-delta gaps. TTFT means adapter stream start to the first
+non-empty provider text delta; provider deltas are not necessarily individual tokenizer tokens.
+Interrupted streams are retried only if no visible delta has been delivered.
+
 ### Independent provider limits
 
 Use `ProviderPool` when one run routes work across multiple providers:

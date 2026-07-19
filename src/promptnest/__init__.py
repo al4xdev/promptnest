@@ -13,6 +13,9 @@ from promptnest.protocols import (
     LLMAdapter,
     ObservedLLMAdapter,
     ObservedResult,
+    StreamCompleted,
+    StreamDelta,
+    StreamingLLMAdapter,
     TokenUsage,
 )
 from promptnest.providers import (
@@ -20,8 +23,9 @@ from promptnest.providers import (
     Provider,
     ProviderPolicy,
     ProviderPool,
+    StreamObservation,
 )
-from promptnest.runner import PromptNest
+from promptnest.runner import PromptNest, StreamUpdate
 
 __all__ = [
     "CheckpointStore",
@@ -42,5 +46,10 @@ __all__ = [
     "RetryPolicy",
     "RetryableAdapterError",
     "SQLiteCheckpointStore",
+    "StreamCompleted",
+    "StreamDelta",
+    "StreamObservation",
+    "StreamingLLMAdapter",
+    "StreamUpdate",
     "TokenUsage",
 ]

@@ -49,7 +49,8 @@ A PASS supports claims about PromptNest's Python orchestration: bounded backpres
 provider limits, token-budget enforcement, retry recovery, structured cancellation, and
 idempotent checkpoint resume.
 
-It does not certify TTFT, model/provider latency, exactly-once external calls, encrypted
+It certifies synthetic TTFT/inter-delta instrumentation, but not real model/provider TTFT or
+latency, exactly-once external calls, encrypted
 checkpoints, automatic provider failover, or third-party validation. Optional real-provider
 profiles may provide additional evidence but do not determine the core badge.
 

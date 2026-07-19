@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import random
 import time
-from collections.abc import AsyncIterable, Hashable, Mapping, Sequence
+from collections.abc import AsyncIterable, Awaitable, Callable, Hashable, Mapping, Sequence
+from dataclasses import asdict, dataclass
 from string import Formatter
 from typing import Any, Generic, TypeVar, cast
 
@@ -27,6 +29,8 @@ from promptnest.providers import (
     ProviderObservation,
     ProviderPolicy,
     ProviderPool,
+    StreamInterruptedError,
+    StreamObservation,
 )
 
 PreResult = TypeVar("PreResult", bound=BaseModel)
@@ -39,6 +43,23 @@ NewPostResult = TypeVar("NewPostResult", bound=BaseModel)
 
 ChunkSource = AsyncIterable[tuple[ChunkKey, Sequence[str]]]
 _STOP = object()
+
+
+@dataclass(frozen=True, slots=True)
+class StreamUpdate:
+    """One visible text delta with orchestration context and elapsed timing."""
+
+    text: str
+    provider: str
+    key: Any
+    stage: str
+    fragment_index: int | None
+    attempt: int
+    provider_elapsed_ms: float
+    end_to_end_elapsed_ms: float
+
+
+StreamHandler = Callable[[StreamUpdate], Awaitable[None] | None]
 
 
 class PromptNest(Generic[ChunkKey, PreResult, PostResult]):
@@ -63,6 +84,7 @@ class PromptNest(Generic[ChunkKey, PreResult, PostResult]):
         self.processed_text_dict = chunks
         self.partial_answers: dict[ChunkKey, PreResult | list[str]] = {}
         self.execution_metrics: dict[str, Any] = {}
+        self.streaming_metrics: dict[str, Any] = {}
         self._source = source
         self._source_consumed = False
         self._logger = logger
@@ -85,6 +107,9 @@ class PromptNest(Generic[ChunkKey, PreResult, PostResult]):
         self._checkpoint_store: CheckpointStore | None = None
         self._checkpoint_run_id: str | None = None
         self._checkpoint_revision: str | None = None
+        self._streaming = False
+        self._stream_handler: StreamHandler | None = None
+        self._stream_observations: list[dict[str, Any]] = []
 
     @classmethod
     def have(
@@ -173,6 +198,16 @@ class PromptNest(Generic[ChunkKey, PreResult, PostResult]):
             raise ConfigurationError("policy must be a RetryPolicy")
         self._retry_policy = policy
         self._random = random.Random(random_seed)
+        return self
+
+    def set_streaming(
+        self,
+        *,
+        on_delta: StreamHandler | None = None,
+    ) -> PromptNest[ChunkKey, PreResult, PostResult]:
+        """Use adapter streams and record TTFT/inter-delta timing."""
+        self._streaming = True
+        self._stream_handler = on_delta
         return self
 
     def set_execution_config(
@@ -359,6 +394,7 @@ class PromptNest(Generic[ChunkKey, PreResult, PostResult]):
             "duration_s": time.perf_counter() - started,
             "provider_metrics": self._provider_pool.metrics(),
         }
+        self.streaming_metrics = self._summarize_streaming_metrics()
         return self
 
     async def _iter_source(self) -> AsyncIterable[tuple[ChunkKey, Sequence[str]]]:
@@ -521,8 +557,54 @@ class PromptNest(Generic[ChunkKey, PreResult, PostResult]):
         last_error: BaseException | None = None
         policy = self._retry_policy
         for attempt in range(1, policy.max_attempts + 1):
+            invocation_started = time.perf_counter()
             try:
                 async with asyncio.timeout(policy.timeout_s):
+                    if self._streaming:
+                        provider = self._provider_pool.provider_name(context)
+                        first_end_to_end_ms: float | None = None
+
+                        async def handle_delta(text: str, provider_elapsed_ms: float) -> None:
+                            nonlocal first_end_to_end_ms
+                            elapsed_ms = (
+                                time.perf_counter() - invocation_started  # noqa: B023
+                            ) * 1000
+                            if first_end_to_end_ms is None:
+                                first_end_to_end_ms = elapsed_ms
+                            if self._stream_handler is None:
+                                return
+                            update = StreamUpdate(
+                                text=text,
+                                provider=provider,  # noqa: B023
+                                key=context.key,
+                                stage=context.stage,
+                                fragment_index=context.fragment_index,
+                                attempt=attempt,  # noqa: B023
+                                provider_elapsed_ms=provider_elapsed_ms,
+                                end_to_end_elapsed_ms=elapsed_ms,
+                            )
+                            outcome = self._stream_handler(update)
+                            if inspect.isawaitable(outcome):
+                                await outcome
+
+                        result, observation, stream = (
+                            await self._provider_pool.invoke_streaming(
+                                context,
+                                prompt,
+                                output_model,
+                                self._llm_config,
+                                handle_delta,
+                            )
+                        )
+                        assert first_end_to_end_ms is not None
+                        self._record_stream(
+                            context,
+                            attempt,
+                            invocation_started,
+                            first_end_to_end_ms,
+                            stream,
+                        )
+                        return result, observation
                     return await self._provider_pool.invoke(
                         context,
                         prompt,
@@ -531,6 +613,12 @@ class PromptNest(Generic[ChunkKey, PreResult, PostResult]):
                     )
             except asyncio.CancelledError:
                 raise
+            except StreamInterruptedError as exc:
+                raise InvocationError(
+                    "stream failed after visible output; retry suppressed to avoid duplicates",
+                    attempts=attempt,
+                    last_error=exc,
+                ) from exc
             except Exception as exc:
                 last_error = exc
                 self._logger.warning(
@@ -557,6 +645,72 @@ class PromptNest(Generic[ChunkKey, PreResult, PostResult]):
             attempts=attempt,
             last_error=last_error,
         ) from last_error
+
+    def _record_stream(
+        self,
+        context: InvocationContext,
+        attempt: int,
+        invocation_started: float,
+        end_to_end_ttft_ms: float,
+        observation: StreamObservation,
+    ) -> None:
+        payload = asdict(observation)
+        payload.update(
+            {
+                "key": str(context.key),
+                "stage": context.stage,
+                "fragment_index": context.fragment_index,
+                "attempt": attempt,
+                "end_to_end_ttft_ms": end_to_end_ttft_ms,
+                "end_to_end_completion_ms": (
+                    time.perf_counter() - invocation_started
+                )
+                * 1000,
+            }
+        )
+        self._stream_observations.append(payload)
+
+    def _summarize_streaming_metrics(self) -> dict[str, Any]:
+        if not self._streaming:
+            return {}
+        ttft = sorted(item["ttft_ms"] for item in self._stream_observations)
+        completion = sorted(item["completion_ms"] for item in self._stream_observations)
+        end_to_end_ttft = sorted(
+            item["end_to_end_ttft_ms"] for item in self._stream_observations
+        )
+        gaps = sorted(
+            gap
+            for item in self._stream_observations
+            for gap in item["inter_delta_ms"]
+        )
+        return {
+            "definition": (
+                "TTFT is adapter stream start to first non-empty text delta; "
+                "a provider delta is not guaranteed to equal one tokenizer token."
+            ),
+            "streams": len(self._stream_observations),
+            "ttft_ms": self._distribution(ttft),
+            "end_to_end_ttft_ms": self._distribution(end_to_end_ttft),
+            "completion_ms": self._distribution(completion),
+            "inter_delta_ms": self._distribution(gaps),
+            "observations": list(self._stream_observations),
+        }
+
+    @staticmethod
+    def _distribution(values: list[float]) -> dict[str, float | int | None]:
+        if not values:
+            return {"count": 0, "p50": None, "p95": None, "p99": None}
+
+        def nearest_rank(percentile: float) -> float:
+            rank = max(1, int((percentile * len(values)) + 0.999999))
+            return values[min(rank, len(values)) - 1]
+
+        return {
+            "count": len(values),
+            "p50": nearest_rank(0.50),
+            "p95": nearest_rank(0.95),
+            "p99": nearest_rank(0.99),
+        }
 
     async def _prepare_checkpoint(self) -> None:
         if self._checkpoint_store is not None:

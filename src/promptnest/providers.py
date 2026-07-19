@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel
 
 from promptnest.policies import RetryableAdapterError
-from promptnest.protocols import LLMAdapter, ObservedLLMAdapter, TokenUsage
+from promptnest.protocols import (
+    LLMAdapter,
+    ObservedLLMAdapter,
+    StreamCompleted,
+    StreamDelta,
+    StreamingLLMAdapter,
+    TokenUsage,
+)
 
 ResultModel = TypeVar("ResultModel", bound=BaseModel)
 Stage = Literal["fragment", "consolidation", "reduce"]
@@ -79,6 +86,24 @@ class Provider:
 class ProviderObservation:
     provider: str
     usage: TokenUsage | None
+
+
+@dataclass(frozen=True, slots=True)
+class StreamObservation:
+    """Timing data for one successful streaming provider invocation."""
+
+    provider: str
+    ttft_ms: float
+    completion_ms: float
+    inter_delta_ms: tuple[float, ...]
+    delta_count: int
+
+
+StreamDeltaHandler = Callable[[str, float], Awaitable[None]]
+
+
+class StreamInterruptedError(Exception):
+    """A stream failed after externally visible output was emitted."""
 
 
 class _TokenBucket:
@@ -203,6 +228,82 @@ class _ProviderRuntime:
             finally:
                 self.active -= 1
 
+    async def invoke_streaming(
+        self,
+        prompt: str,
+        output_model: type[ResultModel],
+        options: Mapping[str, Any],
+        on_delta: StreamDeltaHandler,
+    ) -> tuple[ResultModel, ProviderObservation, StreamObservation]:
+        adapter = self.provider.adapter
+        if not isinstance(adapter, StreamingLLMAdapter):
+            raise TypeError(f"provider {self.name!r} does not support streaming")
+        policy = self.provider.policy
+        estimated = policy.token_estimator(prompt, output_model, options)
+        await self._wait_for_cooldown()
+        self.request_wait_s += await self.requests.acquire(1)
+        self.token_wait_s += await self.tokens.acquire(estimated)
+        async with self.semaphore:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            started = time.perf_counter()
+            first_delta_at: float | None = None
+            previous_delta_at: float | None = None
+            gaps: list[float] = []
+            delta_count = 0
+            completed: StreamCompleted[ResultModel] | None = None
+            try:
+                try:
+                    async for event in adapter.stream(prompt, output_model, **options):
+                        if isinstance(event, StreamDelta):
+                            if not event.text:
+                                continue
+                            now = time.perf_counter()
+                            if first_delta_at is None:
+                                first_delta_at = now
+                            if previous_delta_at is not None:
+                                gaps.append((now - previous_delta_at) * 1000)
+                            previous_delta_at = now
+                            delta_count += 1
+                            await on_delta(event.text, (now - started) * 1000)
+                        elif isinstance(event, StreamCompleted):
+                            completed = event
+                        else:
+                            raise TypeError(f"unsupported stream event {type(event).__name__}")
+                except RetryableAdapterError as exc:
+                    await self._apply_retry_after(exc.retry_after_s)
+                    if delta_count:
+                        raise StreamInterruptedError(
+                            "stream failed after emitting visible output"
+                        ) from exc
+                    raise
+                except Exception as exc:
+                    if delta_count and not isinstance(exc, StreamInterruptedError):
+                        raise StreamInterruptedError(
+                            "stream failed after emitting visible output"
+                        ) from exc
+                    raise
+                if completed is None:
+                    raise ValueError("stream ended without a StreamCompleted event")
+                if first_delta_at is None:
+                    raise ValueError("stream completed without a non-empty text delta")
+                if completed.usage is not None:
+                    await self.tokens.reconcile(estimated, completed.usage.total_tokens)
+                finished = time.perf_counter()
+                return (
+                    completed.value,
+                    ProviderObservation(self.name, completed.usage),
+                    StreamObservation(
+                        provider=self.name,
+                        ttft_ms=(first_delta_at - started) * 1000,
+                        completion_ms=(finished - started) * 1000,
+                        inter_delta_ms=tuple(gaps),
+                        delta_count=delta_count,
+                    ),
+                )
+            finally:
+                self.active -= 1
+
 
 class ProviderPool(Generic[ResultModel]):
     """Route calls to named providers with independent policies."""
@@ -245,6 +346,19 @@ class ProviderPool(Generic[ResultModel]):
     ) -> tuple[ResultModel, ProviderObservation]:
         name = self.provider_name(context)
         return await self._runtimes[name].invoke(prompt, output_model, options)
+
+    async def invoke_streaming(
+        self,
+        context: InvocationContext,
+        prompt: str,
+        output_model: type[ResultModel],
+        options: Mapping[str, Any],
+        on_delta: StreamDeltaHandler,
+    ) -> tuple[ResultModel, ProviderObservation, StreamObservation]:
+        name = self.provider_name(context)
+        return await self._runtimes[name].invoke_streaming(
+            prompt, output_model, options, on_delta
+        )
 
     def metrics(self) -> dict[str, dict[str, float | int]]:
         return {

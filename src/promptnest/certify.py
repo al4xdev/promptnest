@@ -28,7 +28,12 @@ from pydantic import BaseModel
 from promptnest.checkpoints import SQLiteCheckpointStore
 from promptnest.exceptions import ChunkProcessingError
 from promptnest.policies import RetryableAdapterError, RetryPolicy
-from promptnest.protocols import ObservedResult, TokenUsage
+from promptnest.protocols import (
+    ObservedResult,
+    StreamCompleted,
+    StreamDelta,
+    TokenUsage,
+)
 from promptnest.providers import Provider, ProviderPolicy, ProviderPool
 from promptnest.runner import PromptNest
 
@@ -96,6 +101,24 @@ class CertificationAdapter:
         del kwargs
         value = await self._call(prompt, output_model)
         return ObservedResult(value, TokenUsage(input_tokens=1, output_tokens=0))
+
+
+class CertificationStreamingAdapter(CertificationAdapter):
+    async def stream(
+        self,
+        prompt: str,
+        output_model: type[ResultModel],
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamDelta | StreamCompleted[ResultModel]]:
+        del kwargs
+        await asyncio.sleep(0.001)
+        yield StreamDelta('{"value":')
+        await asyncio.sleep(0.001)
+        yield StreamDelta(json.dumps(prompt) + "}")
+        yield StreamCompleted(
+            output_model.model_validate({"value": prompt}),
+            TokenUsage(input_tokens=1, output_tokens=1),
+        )
 
 
 @dataclass(frozen=True)
@@ -395,6 +418,34 @@ def percentile(values: list[float], probability: float) -> float:
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (position - lower)
 
 
+async def streaming_profile(samples: int) -> tuple[list[Gate], dict[str, Any]]:
+    adapter = CertificationStreamingAdapter()
+    deltas: list[str] = []
+    runner = (
+        PromptNest.from_async(adapter, lazy_source(samples, fragments=1))
+        .set_execution_config(workers=8, queue_capacity=16)
+        .set_retry_policy(RetryPolicy(max_attempts=1, timeout_s=1))
+        .set_streaming(on_delta=lambda update: deltas.append(update.text))
+        .set_pre_prompt("{chunk_text}", CertificationResult)
+    )
+    await runner.get_chunks_result()
+    metrics = runner.streaming_metrics
+    ttft = metrics["ttft_ms"]
+    gaps = metrics["inter_delta_ms"]
+    return [
+        Gate(
+            "stream_results",
+            len(runner.partial_answers) == samples,
+            len(runner.partial_answers),
+            f"{samples}",
+        ),
+        Gate("first_delta_events", len(deltas) == samples * 2, len(deltas), f"{samples * 2}"),
+        Gate("ttft_samples", ttft["count"] == samples, ttft["count"], f"{samples}"),
+        Gate("ttft_p99", ttft["p99"] < 20, ttft["p99"], "< 20 ms synthetic"),
+        Gate("inter_delta_samples", gaps["count"] == samples, gaps["count"], f"{samples}"),
+    ], metrics
+
+
 async def latency_profile(samples: int) -> tuple[list[Gate], dict[str, Any]]:
     durations: list[float] = []
     for _ in range(samples):
@@ -461,6 +512,7 @@ async def certify(
         ("cancellation", cancellation_profile()),
         ("checkpoint_recovery", checkpoint_profile()),
         ("latency", latency_profile(samples)),
+        ("streaming_ttft", streaming_profile(samples)),
     ):
         profile_gates, metrics = await coroutine
         profiles[name] = metrics
@@ -474,7 +526,7 @@ async def certify(
     else:
         status = "FAIL"
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "status": status,
         "eligible": clean and gates_passed,
@@ -497,10 +549,10 @@ async def certify(
                 "structured cancellation",
                 "retry recovery",
                 "idempotent checkpoint resume",
+                "synthetic TTFT and inter-delta measurement",
             ],
             "excluded": [
-                "TTFT",
-                "real-provider latency",
+                "real-provider TTFT and latency",
                 "exactly-once external calls",
                 "independent third-party certification",
             ],

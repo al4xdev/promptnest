@@ -60,6 +60,7 @@ async def run(
     runner = (
         PromptNest.from_async(pool, source(jobs))
         .set_execution_config(workers=concurrency, queue_capacity=max(1, concurrency * 2))
+        .set_streaming()
         .set_pre_prompt(
             "{chunk_text}",
             ProviderResult,
@@ -69,7 +70,7 @@ async def run(
     await runner.get_chunks_result()
     duration_s = time.perf_counter() - started
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "provider": "openai",
         "model": model,
@@ -79,8 +80,10 @@ async def run(
         "result_count": len(runner.partial_answers),
         "provider_metrics": pool.metrics(),
         "execution_metrics": runner.execution_metrics,
+        "streaming_metrics": runner.streaming_metrics,
         "latency_note": (
-            "This profile measures complete structured results, not time to first token."
+            "TTFT is measured to the first non-empty provider text delta. Provider deltas "
+            "are not guaranteed to correspond one-to-one with tokenizer tokens."
         ),
     }
 

@@ -104,14 +104,19 @@ behavior fast, deterministic, and reproducible.
 
 ### TTFT
 
-TTFT is **not supported by the current measurement or public adapter contract**.
-`LLMAdapter.invoke()` returns one complete validated Pydantic model, and the official adapters do
-not expose a token stream to PromptNest. Measuring time to the completed structured object and
-labeling it TTFT would be incorrect.
+TTFT is supported when an adapter implements `StreamingLLMAdapter`. Enable it with
+`set_streaming(on_delta=...)`. PromptNest reports nearest-rank p50/p95/p99 for time from adapter
+stream start to the first non-empty text delta, complete-stream duration, and inter-delta gaps.
+Each observation retains provider, stage, key, attempt and fragment context.
 
-A future TTFT benchmark would require a streaming adapter contract with an observable first-token
-event. It should separately report time to first byte/token, time to validated structured result,
-inter-token gaps, and stream failures.
+The metric is precisely a **first non-empty provider text-delta latency**. Providers may group or
+split tokenizer tokens, so PromptNest does not claim that every delta is exactly one model token.
+The deterministic certificate validates the measurement machinery with synthetic streams. Use
+`docs/benchmarks/openai_provider.py` for real OpenAI model/network distributions.
+
+Retries are allowed before the first visible delta. Once a delta has reached the callback, an
+interrupted stream is not retried automatically because replay could duplicate externally visible
+text.
 
 ### Backpressure
 

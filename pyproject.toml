@@ -1,6 +1,6 @@
 [project]
 name = "promptnest"
-version = "0.2.0"
+version = "0.3.0"
 description = "Typed async nested map/reduce orchestration for OpenAI, LangChain, LangGraph, and CrewAI"
 readme = "README.md"
 requires-python = ">=3.11"

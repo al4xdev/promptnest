@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
@@ -42,6 +43,24 @@ class ObservedResult(Generic[ResultModel]):
     usage: TokenUsage | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class StreamDelta:
+    """One non-empty text delta emitted by a streaming adapter."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamCompleted(Generic[ResultModel]):
+    """The final validated result and optional provider usage for a stream."""
+
+    value: ResultModel
+    usage: TokenUsage | None = None
+
+
+StreamEvent = StreamDelta | StreamCompleted[ResultModel]
+
+
 @runtime_checkable
 class ObservedLLMAdapter(Protocol):
     """Optional richer adapter protocol used for token reconciliation."""
@@ -52,3 +71,15 @@ class ObservedLLMAdapter(Protocol):
         output_model: type[ResultModel],
         **kwargs: Any,
     ) -> ObservedResult[ResultModel]: ...
+
+
+@runtime_checkable
+class StreamingLLMAdapter(Protocol):
+    """Optional adapter protocol exposing text deltas and a validated result."""
+
+    def stream(
+        self,
+        prompt: str,
+        output_model: type[ResultModel],
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamEvent[ResultModel]]: ...
