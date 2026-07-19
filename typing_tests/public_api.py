@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, TypeVar, assert_type
 
 from pydantic import BaseModel
 
-from promptnest import PromptNest
+from promptnest import (
+    PromptNest,
+    Provider,
+    ProviderPolicy,
+    ProviderPool,
+    RetryPolicy,
+    SQLiteCheckpointStore,
+)
 from promptnest.adapters import CallableAdapter
 
 ResultModel = TypeVar("ResultModel", bound=BaseModel)
@@ -37,3 +45,24 @@ async def type_contract() -> None:
     await runner.get_chunks_result()
     assert_type(runner.partial_answers["section"], Summary | list[str])
     assert_type(await runner.run_pos_prompt(), Report)
+
+
+async def scalable_type_contract() -> None:
+    async def source() -> AsyncIterator[tuple[str, list[str]]]:
+        yield "section", ["text"]
+
+    adapter = CallableAdapter(fake_llm)
+    pool: ProviderPool[Any] = ProviderPool(
+        {"default": Provider(adapter, ProviderPolicy(max_concurrency=4))}
+    )
+    store = SQLiteCheckpointStore("/tmp/promptnest-typing.sqlite3")
+    runner = (
+        PromptNest.from_async(pool, source())
+        .set_execution_config(workers=8, queue_capacity=16)
+        .set_retry_policy(RetryPolicy(max_attempts=2))
+        .set_checkpoint_store(store, run_id="typing", run_revision="v1")
+        .set_pre_prompt("{chunk_text}", Summary)
+    )
+    await runner.get_chunks_result()
+    assert_type(runner.partial_answers["section"], Summary | list[str])
+    await store.close()

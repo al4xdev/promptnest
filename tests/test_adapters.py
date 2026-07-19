@@ -15,6 +15,7 @@ from promptnest.adapters import (
     LangGraphAdapter,
     OpenAIAdapter,
 )
+from promptnest.policies import RetryableAdapterError
 from promptnest.protocols import LLMAdapter
 
 from .conftest import ChunkSummary
@@ -68,9 +69,7 @@ async def test_openai_adapter_uses_parsed_structured_output() -> None:
         )
     )
     client = SimpleNamespace(
-        beta=SimpleNamespace(
-            chat=SimpleNamespace(completions=SimpleNamespace(parse=parse))
-        )
+        beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
     )
 
     result = await OpenAIAdapter(client, default_model="gpt-test").invoke(
@@ -86,16 +85,63 @@ async def test_openai_adapter_uses_parsed_structured_output() -> None:
 
 
 @pytest.mark.asyncio
+async def test_openai_adapter_exposes_observed_token_usage() -> None:
+    parsed = ChunkSummary(summary="ok", keywords=[])
+    parse = AsyncMock(
+        return_value=SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(parsed=parsed),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=12, completion_tokens=3),
+        )
+    )
+    client = SimpleNamespace(
+        beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
+    )
+
+    observed = await OpenAIAdapter(
+        client,
+        default_model="gpt-test",
+    ).invoke_observed("hello", ChunkSummary)
+
+    assert observed.value is parsed
+    assert observed.usage is not None
+    assert observed.usage.total_tokens == 15
+
+
+@pytest.mark.asyncio
 async def test_openai_adapter_requires_model() -> None:
     with pytest.raises(ValueError, match="requires a model"):
         await OpenAIAdapter(MagicMock()).invoke("hello", ChunkSummary)
 
 
 @pytest.mark.asyncio
-async def test_langchain_adapter_binds_options_and_invokes_structured_model() -> None:
-    runnable = SimpleNamespace(
-        ainvoke=AsyncMock(return_value={"summary": "ok", "keywords": []})
+async def test_openai_adapter_normalizes_rate_limit_retry_after() -> None:
+    error = RuntimeError("limited")
+    error.status_code = 429  # type: ignore[attr-defined]
+    error.response = SimpleNamespace(  # type: ignore[attr-defined]
+        headers={"retry-after": "2.5"}
     )
+    parse = AsyncMock(side_effect=error)
+    client = SimpleNamespace(
+        beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))
+    )
+
+    with pytest.raises(RetryableAdapterError) as captured:
+        await OpenAIAdapter(client, default_model="gpt-test").invoke(
+            "hello",
+            ChunkSummary,
+        )
+
+    assert captured.value.retry_after_s == 2.5
+
+
+@pytest.mark.asyncio
+async def test_langchain_adapter_binds_options_and_invokes_structured_model() -> None:
+    runnable = SimpleNamespace(ainvoke=AsyncMock(return_value={"summary": "ok", "keywords": []}))
     bound = MagicMock()
     bound.with_structured_output.return_value = runnable
     model = MagicMock()
@@ -157,7 +203,7 @@ async def test_langgraph_adapter_maps_state_and_selects_output() -> None:
         ),
         SimpleNamespace(
             pydantic=None,
-            json_dict={"summary": "json", "keywords":[]},
+            json_dict={"summary": "json", "keywords": []},
             raw="",
         ),
         SimpleNamespace(

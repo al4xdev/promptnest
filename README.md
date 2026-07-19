@@ -6,6 +6,7 @@
 [![PyPI](https://img.shields.io/pypi/v/promptnest)](https://pypi.org/project/promptnest/)
 [![Python](https://img.shields.io/pypi/pyversions/promptnest)](https://pypi.org/project/promptnest/)
 [![Test Suite](https://github.com/al4xdev/promptnest/actions/workflows/test.yml/badge.svg)](https://github.com/al4xdev/promptnest/actions/workflows/test.yml)
+[![Core Certification](https://github.com/al4xdev/promptnest/actions/workflows/certification.yml/badge.svg)](https://github.com/al4xdev/promptnest/actions/workflows/certification.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 PromptNest applies one structured prompt to many text fragments concurrently, consolidates
@@ -107,6 +108,88 @@ asyncio.run(main())
 The keys passed to `have()` are preserved in `runner.partial_answers`. If a key contains multiple
 fragments, PromptNest invokes the pre-prompt for each fragment and invokes it once more with their
 JSON results to produce one value for that key.
+
+## Bounded execution and backpressure
+
+PromptNest 0.2 admits logical jobs through a bounded queue and processes them with a fixed worker
+pool. `from_async()` allows a lazy producer to be slowed when the queue is full instead of
+materializing every job or task in advance:
+
+```python
+async def jobs():
+    for index in range(10_000):
+        yield index, [f"document {index}"]
+
+
+runner = (
+    PromptNest.from_async(adapter, jobs())
+    .set_execution_config(workers=32, queue_capacity=128)
+    .set_concurrency(16)
+    .set_pre_prompt("Extract facts:\n{chunk_text}", ExtractedFacts)
+)
+await runner.get_chunks_result()
+```
+
+`execution_metrics` reports the queue high-watermark, producer admission waits, duration, and
+per-provider concurrency/rate-limit waits.
+
+### Independent provider limits
+
+Use `ProviderPool` when one run routes work across multiple providers:
+
+```python
+from promptnest import Provider, ProviderPolicy, ProviderPool
+
+pool = ProviderPool(
+    {
+        "primary": Provider(
+            primary_adapter,
+            ProviderPolicy(
+                max_concurrency=8,
+                requests_per_second=10,
+                request_burst=2,
+                tokens_per_second=20_000,
+                token_burst=4_000,
+            ),
+        ),
+        "secondary": Provider(
+            secondary_adapter,
+            ProviderPolicy(max_concurrency=4),
+        ),
+    },
+    router=lambda context: "primary" if int(context.key) % 2 == 0 else "secondary",
+)
+```
+
+Routing is stable per invocation context; PromptNest does not silently fail over between providers.
+
+### Jittered retries and durable recovery
+
+```python
+from promptnest import RetryPolicy, SQLiteCheckpointStore
+
+runner = (
+    runner
+    .set_retry_policy(
+        RetryPolicy(
+            max_attempts=5,
+            timeout_s=60,
+            base_delay_s=0.5,
+            max_delay_s=20,
+        )
+    )
+    .set_checkpoint_store(
+        SQLiteCheckpointStore("promptnest-checkpoints.sqlite3"),
+        run_id="report-2026-07",
+        run_revision="prompts-v1",
+    )
+)
+```
+
+The default new retry policy uses exponential full jitter and respects normalized `Retry-After`
+values. SQLite checkpoints allow a later process to reuse validated fragment results and retry
+only a failed consolidation. Result recovery is idempotent; an external call that finished before
+its checkpoint was committed may be repeated.
 
 ## How nested map/reduce works
 
@@ -380,7 +463,10 @@ JSON string.
 | `PromptNest.have(adapter, chunks)` | Creates a runner from a non-empty keyed mapping of string fragments |
 | `set_llm_config(**options)` | Forwards runtime-specific options to every adapter call |
 | `set_retry_config(...)` | Sets attempts, delay, and per-attempt timeout |
-| `set_concurrency(limit)` | Bounds concurrent adapter calls; `None` is unbounded |
+| `set_concurrency(limit)` | Bounds default-adapter calls; `None` uses the worker count |
+| `set_execution_config(...)` | Sets fixed workers and bounded producer queue |
+| `set_retry_policy(...)` | Enables classified exponential full-jitter retries |
+| `set_checkpoint_store(...)` | Enables durable stage-level recovery |
 | `set_pre_prompt(...)` | Requires `{chunk_text}` and optionally exposes `{key_text}` |
 | `set_pos_prompt(...)` | Requires `{partial_answers}`, supplied as keyed JSON |
 | `get_chunks_result(...)` | Executes map and per-key consolidation |
@@ -408,6 +494,26 @@ uv venv /tmp/promptnest-consumer --seed
 ```
 
 No network model call is made in either test.
+
+The repository also includes a reproducible synthetic throughput and latency benchmark. It
+documents percentile methodology, comparison limits, why TTFT is not available through the
+current structured-output contract, and why bounded concurrency is not complete backpressure:
+
+```fish
+uv run python docs/benchmarks/performance.py
+```
+
+See [Performance and load testing](docs/performance.md) and the
+[local evidence report](docs/performance-evidence.md) before interpreting or publishing results.
+
+The mandatory core profile exercises 10,000 lazy jobs, bounded backpressure, independent provider
+limits, token budgets, retries, cancellation, checkpoint recovery, and latency gates:
+
+```fish
+uv run promptnest-certify --output-dir /tmp/promptnest-certificate
+```
+
+See [Core certification](docs/certification.md) for the exact PASS criteria and claim boundary.
 
 ## Development
 

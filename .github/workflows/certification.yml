@@ -1,0 +1,45 @@
+name: Core Certification
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  certify:
+    name: 10k bounded orchestration
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project
+        run: uv sync --locked --dev
+
+      - name: Verify clean checkout
+        run: test -z "$(git status --porcelain)"
+
+      - name: Run core certification
+        run: uv run --locked promptnest-certify --output-dir certification-artifacts
+
+      - name: Upload certification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: promptnest-core-certificate-${{ github.sha }}
+          path: certification-artifacts/
+          if-no-files-found: error
